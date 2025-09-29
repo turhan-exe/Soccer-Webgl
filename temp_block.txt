@@ -1,0 +1,8 @@
+﻿ApplyFormation(runtimeHomeTeam, data.formationHome);
+            ApplyFormation(runtimeAwayTeam, data.formationAway);`r`n`r`n            if (!string.IsNullOrWhiteSpace(data.homeTeamKey) && runtimeHomeTeam != null)`r`n            {`r`n                runtimeHomeTeam.TeamName = data.homeTeamKey;`r`n            }`r`n`r`n            if (!string.IsNullOrWhiteSpace(data.awayTeamKey) && runtimeAwayTeam != null)`r`n            {`r`n                runtimeAwayTeam.TeamName = data.awayTeamKey;`r`n            }`r`n`r`n                        if (runtimeHomeTeam == null || runtimeAwayTeam == null)
+            {
+                Debug.LogError($"Bridge.ApplyTeams: Teams not found. home='{activeHomeKey}' away='{activeAwayKey}'");
+                return;
+            }
+
+            

@@ -1,0 +1,19 @@
+[Unity]
+Library/
+Temp/
+Obj/
+Logs/
+UserSettings/
+MemoryCaptures/
+Builds/
+
+# IDE
+.vs/
+.vscode/
+*.csproj
+*.sln
+*.unityproj
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,211 @@
+                    }
+                    else
+                    {
+                        p.Name = $"Player {i + 1}";
+                        SetDefaultStats(p);
+                    }
+                }
+                else
+                {
+                    p.Name = $"Player {i + 1}";
+                    SetDefaultStats(p);
+                }
+
+                players[i] = p;
+            }
+            team.Players = players;
+            return team;
+        }
+
+        private static void TryApplyKitFromJObject(JObject teamObj, string key, KitEntry target, Color fb1, Color fb2)
+        {
+            try
+            {
+                var kitObj = teamObj[key] as JObject;
+                if (kitObj == null || target == null) return;
+                target.Color1 = ParseColorOrDefault(kitObj.Value<string>("color1"), fb1);
+                target.Color2 = ParseColorOrDefault(kitObj.Value<string>("color2"), fb2);
+                target.TextColor = ParseColorOrDefault(kitObj.Value<string>("textColor"), Color.black);
+                target.GKColor1 = ParseColorOrDefault(kitObj.Value<string>("gkColor1"), new Color(0.10f, 0.65f, 0.35f));
+                target.GKColor2 = ParseColorOrDefault(kitObj.Value<string>("gkColor2"), new Color(0.90f, 0.90f, 0.90f));
+                target.GKTextColor = ParseColorOrDefault(kitObj.Value<string>("gkTextColor"), Color.black);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[MatchBridge] TryApplyKitFromJObject error: " + ex.Message);
+            }
+        }
+
+        private static string NormalizeFormationString(string formation)
+        {
+            if (string.IsNullOrWhiteSpace(formation)) return null;
+            var f = formation.Trim();
+            f = f.Replace('-', '_').Replace(' ', '_');
+            if (!f.StartsWith("_")) f = "_" + f;
+            return f;
+        }
+
+        private static void SetDefaultStats(PlayerEntry p)
+        {
+            p.strength = 60;
+            p.acceleration = 60;
+            p.topSpeed = 60;
+            p.dribbleSpeed = 60;
+            p.jump = 60;
+            p.tackling = 60;
+            p.ballKeeping = 60;
+            p.passing = 60;
+            p.longBall = 60;
+            p.agility = 60;
+            p.shooting = 60;
+            p.shootPower = 60;
+            p.positioning = 60;
+            p.reaction = 60;
+            p.ballControl = 60;
+        }
+
+        private static void ApplyStatsFromObject(PlayerEntry p, JObject po)
+        {
+            // Accept either direct fields or nested 'stats' object
+            var stats = po["stats"] as JObject ?? po;
+
+            p.strength      = ReadStat(stats, 60, "strength", "Strength");
+            p.acceleration  = ReadStat(stats, 60, "acceleration", "Acceleration", "Accel");
+            p.topSpeed      = ReadStat(stats, 60, "topSpeed", "TopSpeed", "Speed", "Pace");
+            p.dribbleSpeed  = ReadStat(stats, 60, "dribbleSpeed", "DribbleSpeed", "Dribbling");
+            p.jump          = ReadStat(stats, 60, "jump", "Jump");
+            p.tackling      = ReadStat(stats, 60, "tackling", "Tackling", "Tackle");
+            p.ballKeeping   = ReadStat(stats, 60, "ballKeeping", "BallKeeping");
+            p.passing       = ReadStat(stats, 60, "passing", "Passing", "Pass");
+            p.longBall      = ReadStat(stats, 60, "longBall", "LongBall", "LongPass");
+            p.agility       = ReadStat(stats, 60, "agility", "Agility");
+            p.shooting      = ReadStat(stats, 60, "shooting", "Shooting");
+            p.shootPower    = ReadStat(stats, 60, "shootPower", "ShootPower", "Power");
+            p.positioning   = ReadStat(stats, 60, "positioning", "Positioning");
+            p.reaction      = ReadStat(stats, 60, "reaction", "Reaction", "Reactions");
+            p.ballControl   = ReadStat(stats, 60, "ballControl", "BallControl", "Control");
+        }
+
+        private static int ReadStat(JObject stats, int fallback, params string[] keys)
+        {
+            foreach (var k in keys)
+            {
+                if (stats.TryGetValue(k, StringComparison.OrdinalIgnoreCase, out var tok))
+                {
+                    if (tok != null && tok.Type != JTokenType.Null)
+                    {
+                        var val = tok.Value<float>();
+                        return Scale01Or100(val);
+                    }
+                }
+            }
+            return fallback;
+        }
+
+        private static int Scale01Or100(float v)
+        {
+            // If the number looks like 0..1, scale up; otherwise clamp 0..100
+            if (v <= 1.5f) v *= 100f;
+            return Mathf.Clamp(Mathf.RoundToInt(v), 0, 100);
+        }
+
+        private static Color ParseColorOrDefault(string val, Color fallback)
+        {
+            if (TryParseColor(val, out var c)) return c;
+            return fallback;
+        }
+
+        private static bool TryParseColor(string val, out Color color)
+        {
+            color = default;
+            if (string.IsNullOrWhiteSpace(val)) return false;
+            val = val.Trim();
+
+            try
+            {
+                // Hex #RRGGBB or #RRGGBBAA
+                if (val.StartsWith("#"))
+                {
+                    if (ColorUtility.TryParseHtmlString(val, out var hc))
+                    {
+                        color = hc; return true;
+                    }
+                }
+                else if (val.Contains(","))
+                {
+                    var parts = val.Split(',');
+                    if (parts.Length >= 3)
+                    {
+                        float[] nums = new float[4] {1,1,1,1};
+                        for (int i = 0; i < parts.Length && i < 4; i++)
+                        {
+                            var s = parts[i].Trim();
+                            if (float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var f))
+                            {
+                                // If values are >1 assume 0..255
+                                nums[i] = f > 1.01f ? Mathf.Clamp01(f/255f) : Mathf.Clamp01(f);
+                            }
+                        }
+                        color = new Color(nums[0], nums[1], nums[2], nums.Length>=4?nums[3]:1f);
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        // Unity -> React: send match result JSON back
+        public void SendResultToReact(string resultJson)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            try { SendMessageToJS(resultJson); } catch (Exception ex) { Debug.LogError("[MatchBridge] SendResultToReact failed: " + ex); }
+#else
+            Debug.Log("[MatchBridge->JS] " + resultJson);
+#endif
+        }
+
+        private void OnGoalScored(GoalScoredEvent e)
+        {
+            if (e.Scorer != null)
+            {
+                scorerNames.Add(e.Scorer.Name);
+            }
+        }
+
+        private void OnFinalWhistle(FinalWhistleEvent _)
+        {
+            try
+            {
+                var mm = MatchManager.Current;
+                var details = MatchManager.CurrentMatchDetails;
+                if (mm == null || details == null) return;
+
+                var result = new BridgeMatchResult
+                {
+                    matchId = currentMatchId,
+                    homeTeam = details.homeTeam?.TeamName,
+                    awayTeam = details.awayTeam?.TeamName,
+                    homeGoals = mm.homeTeamScore,
+                    awayGoals = mm.awayTeamScore,
+                    scorers = new List<string>(scorerNames),
+                };
+
+                var json = JsonConvert.SerializeObject(result);
+                SendResultToReact(json);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MatchBridge] OnFinalWhistle error: " + ex);
+            }
+        }
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        [DllImport("__Internal")]
+        private static extern void SendMessageToJS(string message);
+#else
+        // Editor/Standalone stub for local testing
+        private static void SendMessageToJS(string message) { Debug.Log("[Stub JS] " + message); }
+#endif
+    }
+}

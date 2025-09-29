@@ -1,0 +1,6 @@
+<linker>
+  <assembly fullname="Unity.ResourceManager">
+    <!-- Prevent IL2CPP/stripping from removing the default ctor used via reflection -->
+    <type fullname="UnityEngine.ResourceManagement.AsyncOperations.GroupOperation" preserve="all" />
+  </assembly>
+</linker>

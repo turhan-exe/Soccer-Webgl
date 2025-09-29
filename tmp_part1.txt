@@ -1,0 +1,250 @@
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+using FStudio.Events;
+using FStudio.MatchEngine;
+using FStudio.MatchEngine.Events;
+using FStudio.UI.MatchThemes.MatchEvents;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using Shared.Responses;
+using UnityEngine;
+using FStudio.Database;
+using FStudio.MatchEngine.Enums;
+using FStudio.Data;
+using FStudio.UI.Utilities;
+
+namespace FStudio.WebGL
+{
+    /// <summary>
+    /// Bridge between Web (React) and Unity WebGL build.
+    /// - Receives match JSON and starts the match
+    /// - Dispatches match results back to JS via a WebGL plugin function
+    ///
+    /// Auto-instantiated at runtime and kept across scenes.
+    /// </summary>
+    public class MatchBridge : MonoBehaviour
+    {
+        public static MatchBridge Instance { get; private set; }
+
+        [Serializable]
+        private class BridgeTeamDefinition
+        {
+            public string name;
+            public string[] players;   // 11 names in order (GK -> FW)
+            public string formation;   // optional, e.g., "FourThreeThree"
+
+            // Optional quick kit switch override for this team
+            public bool? altKit;
+
+            // Optional runtime kit definitions
+            public BridgeKitDefinition homeKit;
+            public BridgeKitDefinition awayKit;
+        }
+
+        [Serializable]
+        private class BridgeKitDefinition
+        {
+            // Accept hex ("#RRGGBB[AA]") or numbers "r,g,b[,a]" where r,g,b in 0..255 or 0..1
+            public string color1;
+            public string color2;
+            public string textColor;
+
+            public string gkColor1;
+            public string gkColor2;
+            public string gkTextColor;
+        }
+
+        [Serializable]
+        private class BridgeTeamsRequest
+        {
+            public BridgeTeamDefinition home;
+            public BridgeTeamDefinition away;
+
+            public bool autoStart = false;
+
+            public string aiLevel;       // optional
+            public string userTeam;      // optional
+            public string dayTime;       // optional
+        }
+
+        [Serializable]
+        private class BridgeMatchRequest
+        {
+            public string matchId;
+            public string homeTeamKey;   // e.g., "Istanbul" (Resources/Database/Istanbul.asset)
+            public string awayTeamKey;   // e.g., "London"
+            public bool autoStart = true;
+
+            public string aiLevel;       // e.g., "Legendary"
+            public string userTeam;      // "None", "Home", "Away"
+            public string dayTime;       // e.g., "Night"
+
+            // Optional quick kit switches: false => Home kit, true => Away kit
+            public bool? homeAltKit;
+            public bool? awayAltKit;
+        }
+
+        [Serializable]
+        private class BridgeMatchResult
+        {
+            public string matchId;
+            public string homeTeam;
+            public string awayTeam;
+            public int homeGoals;
+            public int awayGoals;
+            public List<string> scorers;
+        }
+
+        private string currentMatchId;
+        private readonly List<string> scorerNames = new List<string>();
+
+        // Optional preference that React side can set before sending a request
+        private MatchCreateRequest.UserTeam preferredUserTeam = MatchCreateRequest.UserTeam.None;
+
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
+        private static void EnsureInstance()
+        {
+            if (Instance != null) return;
+            var go = new GameObject("MatchBridge");
+            DontDestroyOnLoad(go);
+            Instance = go.AddComponent<MatchBridge>();
+        }
+
+        private void Awake()
+        {
+            if (Instance != null && Instance != this)
+            {
+                Destroy(gameObject);
+                return;
+            }
+
+            Instance = this;
+            DontDestroyOnLoad(gameObject);
+        }
+
+        private void OnEnable()
+        {
+            EventManager.Subscribe<GoalScoredEvent>(OnGoalScored);
+            EventManager.Subscribe<FinalWhistleEvent>(OnFinalWhistle);
+        }
+
+        private void OnDisable()
+        {
+            EventManager.UnSubscribe<GoalScoredEvent>(OnGoalScored);
+            EventManager.UnSubscribe<FinalWhistleEvent>(OnFinalWhistle);
+        }
+
+        /// <summary>
+        /// React -> Unity: update the preferred human-controlled team.
+        /// Accepts: "Home", "Away" or "None" (case-insensitive).
+        /// Stored and used as default for subsequent requests if not provided in JSON.
+        /// </summary>
+        public void SelectUserTeam(string side)
+        {
+            try
+            {
+                if (Enum.TryParse<MatchCreateRequest.UserTeam>(side, true, out var ut))
+                {
+                    preferredUserTeam = ut;
+                    Debug.Log("[MatchBridge] Preferred user team set to: " + preferredUserTeam);
+                }
+                else
+                {
+                    Debug.LogWarning("[MatchBridge] SelectUserTeam invalid value: " + side);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MatchBridge] SelectUserTeam exception: " + ex);
+            }
+        }
+
+        // React -> Unity: receive only team names and rosters; show Upcoming Match UI preselected
+        public async void ShowTeamsFromJSON(string json)
+        {
+            try
+            {
+                Debug.Log("[MatchBridge] Teams JSON received: " + json);
+                var req = JsonConvert.DeserializeObject<BridgeTeamsRequest>(json);
+                if (req?.home == null || req.away == null)
+                {
+                    Debug.LogError("[MatchBridge] Invalid teams payload.");
+                    return;
+                }
+
+                // Log parsed request at a glance
+                Debug.Log($"[MatchBridge] Parsed HOME name='{req.home.name}', formation='{req.home.formation}', players={(req.home.players==null?0:req.home.players.Length)}");
+                Debug.Log($"[MatchBridge] Parsed AWAY name='{req.away.name}', formation='{req.away.formation}', players={(req.away.players==null?0:req.away.players.Length)}");
+
+                var homeTeam = CreateRuntimeTeam(req.home);
+                var awayTeam = CreateRuntimeTeam(req.away);
+
+                // Log created teams summary
+                Debug.Log($"[MatchBridge] Created HOME team='{homeTeam.TeamName}', formation='{homeTeam.Formation}', players={homeTeam.Players?.Length}");
+                Debug.Log($"[MatchBridge] Created AWAY team='{awayTeam.TeamName}', formation='{awayTeam.Formation}', players={awayTeam.Players?.Length}");
+
+                var matchRequest = new MatchCreateRequest(homeTeam, awayTeam);
+                try
+                {
+                    Debug.Log($"[MatchBridge] matchRequest: HOME='{homeTeam.TeamName}' players={homeTeam.Players?.Length} formation='{homeTeam.Formation}', AWAY='{awayTeam.TeamName}' players={awayTeam.Players?.Length} formation='{awayTeam.Formation}'");
+                }
+                catch { }
+
+                if (Enum.TryParse<AILevel>(req.aiLevel, true, out var ai))
+                {
+                    matchRequest.aiLevel = ai;
+                }
+
+                if (Enum.TryParse<MatchCreateRequest.UserTeam>(req.userTeam, true, out var ut))
+                {
+                    matchRequest.userTeam = ut;
+                }
+                else
+                {
+                    matchRequest.userTeam = preferredUserTeam;
+                }
+
+                if (Enum.TryParse<DayTimes>(req.dayTime, true, out var dt))
+                {
+                    matchRequest.dayTime = dt;
+                }
+
+                scorerNames.Clear();
+
+                // Open Upcoming Match UI with teams preselected
+                Debug.Log("[MatchBridge] Opening Upcoming Match UI with provided teams...");
+                await MatchEngineLoader.CreateMatch(matchRequest);
+                Debug.Log("[MatchBridge] Upcoming Match UI should now be visible.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MatchBridge] ShowTeamsFromJSON exception: " + ex);
+            }
+        }
+
+        private static TeamEntry CreateRuntimeTeam(BridgeTeamDefinition def)
+        {
+            // Create a transient team ScriptableObject instance for runtime only
+            var team = ScriptableObject.CreateInstance<TeamEntry>();
+            team.TeamName = string.IsNullOrWhiteSpace(def.name) ? "Team" : def.name.Trim();
+
+            var normForm = NormalizeFormationString(def.formation);
+            if (!string.IsNullOrEmpty(normForm) && Enum.TryParse<FStudio.Data.Formations>(normForm, true, out var form))
+            {
+                team.Formation = form;
+                Debug.Log($"[MatchBridge] Formation parsed for '{team.TeamName}': {team.Formation}");
+            }
+            else
+            {
+                Debug.LogWarning($"[MatchBridge] Formation could not be parsed for '{team.TeamName}'. Using default: {team.Formation}");
+            }
+
+            // Runtime kits with safe defaults; allow overrides from payload
+            var defaultHome1 = new Color(0.13f, 0.36f, 0.78f);
+            var defaultHome2 = new Color(0.95f, 0.95f, 0.95f);
+            var defaultAway1 = new Color(0.80f, 0.12f, 0.15f);
+            var defaultAway2 = new Color(0.95f, 0.95f, 0.95f);
+            team.HomeKit = CreateRuntimeKit(defaultHome1, defaultHome2);
+            team.AwayKit = CreateRuntimeKit(defaultAway1, defaultAway2);

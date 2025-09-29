@@ -1,0 +1,250 @@
+                    await MatchEngineLoader.CreateMatch(matchRequest);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MatchBridge] LoadSquadsFromJSON exception: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// React -> Unity: Publish runtime HOME and AWAY teams into DatabaseService so they appear in Team Selection screen.
+        /// Accepts same payload as ShowTeamsFromJSON. Options: { home:{...}, away:{...}, openMenu:true, select:true }
+        /// If openMenu==true, opens main menu and selects these teams on left/right widgets.
+        /// </summary>
+        public async void LoadTeamsToSelectionFromJSON(string json)
+        {
+            try
+            {
+                var root = JObject.Parse(json);
+                var homeObj = root["home"] as JObject;
+                var awayObj = root["away"] as JObject;
+                if (homeObj == null || awayObj == null)
+                {
+                    Debug.LogError("[MatchBridge] LoadTeamsToSelectionFromJSON: Missing 'home' or 'away'.");
+                    return;
+                }
+
+                var homeTeam = CreateRuntimeTeamFromJObject(homeObj);
+                var awayTeam = CreateRuntimeTeamFromJObject(awayObj);
+
+                // Merge into database list (replace by team name)
+                var current = DatabaseService.LoadTeams();
+                var list = new List<TeamEntry>(current.Length + 2);
+                foreach (var t in current)
+                {
+                    if (t == null) continue;
+                    if (string.Equals(t.TeamName, homeTeam.TeamName, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (string.Equals(t.TeamName, awayTeam.TeamName, StringComparison.OrdinalIgnoreCase)) continue;
+                    list.Add(t);
+                }
+                list.Add(homeTeam);
+                list.Add(awayTeam);
+                DatabaseService.SetTeams(list.ToArray());
+
+                var openMenu = root.Value<bool?>("openMenu") ?? true;
+                var doSelect = root.Value<bool?>("select") ?? true;
+                if (openMenu)
+                {
+                    FStudio.Events.EventManager.Trigger(new FStudio.UI.Events.MainMenuEvent());
+                }
+
+                if (doSelect)
+                {
+                    TeamSelectionTeam homeSel = null, awaySel = null;
+                    for (int i = 0; i < 200; i++)
+                    {
+                        homeSel = FindSelectionTeam("HomeTeamSelection");
+                        awaySel = FindSelectionTeam("AwayTeamSelection");
+                        if (homeSel != null && awaySel != null) break;
+                        await Task.Delay(10);
+                    }
+
+                    var teams = DatabaseService.LoadTeams();
+                    int homeIndex = FindTeamIndex(teams, homeTeam.TeamName);
+                    int awayIndex = FindTeamIndex(teams, awayTeam.TeamName);
+
+                    if (homeSel != null && homeIndex >= 0) homeSel.SetTeam(homeIndex);
+                    if (awaySel != null && awayIndex >= 0) awaySel.SetTeam(awayIndex);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MatchBridge] LoadTeamsToSelectionFromJSON exception: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// React -> Unity: Open Main Menu and preselect teams on the Team Selection screen by key/name.
+        /// Payload example: { "homeTeamKey":"Istanbul", "awayTeamKey":"London", "userTeam":"Home", "openMenu":true }
+        /// </summary>
+        public async void PreselectMenuFromJSON(string json)
+        {
+            try
+            {
+                Debug.Log("[MatchBridge] PreselectMenuFromJSON received.");
+                var root = JObject.Parse(json);
+                var homeKey = root.Value<string>("homeTeamKey") ?? root.Value<string>("home");
+                var awayKey = root.Value<string>("awayTeamKey") ?? root.Value<string>("away");
+                var openMenu = root.Value<bool?>("openMenu") ?? true;
+                var userTeamStr = root.Value<string>("userTeam");
+
+                // Map to Database indices
+                var teams = DatabaseService.LoadTeams();
+                int homeIndex = FindTeamIndex(teams, homeKey);
+                int awayIndex = FindTeamIndex(teams, awayKey);
+
+                if (openMenu)
+                {
+                    FStudio.Events.EventManager.Trigger(new FStudio.UI.Events.MainMenuEvent());
+                }
+
+                // Wait until objects appear
+                TeamSelectionTeam homeSel = null, awaySel = null;
+                for (int i = 0; i < 200; i++) // ~2 seconds max
+                {
+                    homeSel = FindSelectionTeam("HomeTeamSelection");
+                    awaySel = FindSelectionTeam("AwayTeamSelection");
+                    if (homeSel != null && awaySel != null) break;
+                    await Task.Delay(10);
+                }
+
+                if (homeSel == null || awaySel == null)
+                {
+                    // Fallback: try find by type if names fail
+                    var all = GameObject.FindObjectsOfType<TeamSelectionTeam>(true);
+                    if (all != null && all.Length >= 2)
+                    {
+                        // Heuristic: pick by X position (left=home, right=away)
+                        System.Array.Sort(all, (a,b)=> a.transform.position.x.CompareTo(b.transform.position.x));
+                        homeSel = all[0];
+                        awaySel = all[all.Length-1];
+                    }
+                }
+
+                if (homeSel != null && homeIndex >= 0)
+                {
+                    homeSel.SetTeam(homeIndex);
+                    Debug.Log($"[MatchBridge] Preselected home index {homeIndex} for '{homeKey}'.");
+                }
+                else
+                {
+                    Debug.LogWarning($"[MatchBridge] Could not preselect home team for key='{homeKey}'.");
+                }
+
+                if (awaySel != null && awayIndex >= 0)
+                {
+                    awaySel.SetTeam(awayIndex);
+                    Debug.Log($"[MatchBridge] Preselected away index {awayIndex} for '{awayKey}'.");
+                }
+                else
+                {
+                    Debug.LogWarning($"[MatchBridge] Could not preselect away team for key='{awayKey}'.");
+                }
+
+                // Optionally set default side preference for MatchSettingsPanel via PlayerPrefs
+                if (!string.IsNullOrWhiteSpace(userTeamStr) && Enum.TryParse<MatchCreateRequest.UserTeam>(userTeamStr, true, out var ut))
+                {
+                    // MatchSettingsPanel reads PlayerPrefs with key SETTING_SIDE on Awake
+                    PlayerPrefs.SetInt("SETTING_SIDE", (int)ut);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MatchBridge] PreselectMenuFromJSON exception: " + ex);
+            }
+        }
+
+        private static TeamSelectionTeam FindSelectionTeam(string name)
+        {
+            var go = GameObject.Find(name);
+            if (go == null) return null;
+            return go.GetComponent<TeamSelectionTeam>();
+        }
+
+        private static int FindTeamIndex(TeamEntry[] teams, string key)
+        {
+            if (teams == null || string.IsNullOrWhiteSpace(key)) return -1;
+            for (int i = 0; i < teams.Length; i++)
+            {
+                var t = teams[i];
+                if (t == null) continue;
+                if (string.Equals(t.TeamName, key, StringComparison.OrdinalIgnoreCase)) return i;
+                if (string.Equals(t.name, key, StringComparison.OrdinalIgnoreCase)) return i;
+            }
+            return -1;
+        }
+
+        private static TeamEntry LoadTeamByKey(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return null;
+
+            // Try direct Resources path: Resources/Database/<key>.asset
+            var te = Resources.Load<TeamEntry>("Database/" + key);
+            if (te != null)
+            {
+                Debug.Log($"[MatchBridge] Found TeamEntry in Resources: '{key}'");
+                return te;
+            }
+
+            // Fallback: search loaded teams by name or asset name
+            foreach (var t in FStudio.DatabaseService.LoadTeams())
+            {
+                if (string.Equals(t.TeamName, key, StringComparison.OrdinalIgnoreCase)) return t;
+                if (string.Equals(t.name, key, StringComparison.OrdinalIgnoreCase)) return t;
+            }
+            Debug.LogWarning($"[MatchBridge] TeamEntry not found for key='{key}'.");
+            return null;
+        }
+
+        private static TeamEntry CreateRuntimeTeamFromJObject(JObject teamObj)
+        {
+            var name = teamObj.Value<string>("name");
+            var formationStr = teamObj.Value<string>("formation");
+
+            var team = ScriptableObject.CreateInstance<TeamEntry>();
+            team.TeamName = string.IsNullOrWhiteSpace(name) ? "Team" : name.Trim();
+            var defaultHome1 = new Color(0.13f, 0.36f, 0.78f);
+            var defaultHome2 = new Color(0.95f, 0.95f, 0.95f);
+            var defaultAway1 = new Color(0.80f, 0.12f, 0.15f);
+            var defaultAway2 = new Color(0.95f, 0.95f, 0.95f);
+            team.HomeKit = CreateRuntimeKit(defaultHome1, defaultHome2);
+            team.AwayKit = CreateRuntimeKit(defaultAway1, defaultAway2);
+
+            var logo = ScriptableObject.CreateInstance<LogoEntry>();
+            logo.TeamLogoMaterial = Texture2D.whiteTexture;
+            logo.TeamLogoColor1 = new Color(0.85f, 0.85f, 0.85f);
+            logo.TeamLogoColor2 = new Color(0.25f, 0.25f, 0.25f);
+            team.TeamLogo = logo;
+
+            // Formation parsing with normalization
+            var normalized = NormalizeFormationString(formationStr);
+            if (!string.IsNullOrEmpty(normalized) && Enum.TryParse<FStudio.Data.Formations>(normalized, out var formation))
+            {
+                team.Formation = formation;
+            }
+
+            // Optional kit overrides via nested objects
+            TryApplyKitFromJObject(teamObj, "homeKit", team.HomeKit, defaultHome1, defaultHome2);
+            TryApplyKitFromJObject(teamObj, "awayKit", team.AwayKit, defaultAway1, defaultAway2);
+
+            // Players
+            var playersToken = teamObj["players"] as JArray ?? new JArray();
+            var players = new PlayerEntry[11];
+            for (int i = 0; i < players.Length; i++)
+            {
+                var p = ScriptableObject.CreateInstance<PlayerEntry>();
+                p.team = team;
+
+                if (i < playersToken.Count)
+                {
+                    var it = playersToken[i];
+                    if (it.Type == JTokenType.String)
+                    {
+                        p.Name = it.Value<string>() ?? ($"Player {i + 1}");
+                        SetDefaultStats(p);
+                    }
+                    else if (it is JObject po)
+                    {
+                        p.Name = po.Value<string>("name") ?? ($"Player {i + 1}");
+                        ApplyStatsFromObject(p, po);

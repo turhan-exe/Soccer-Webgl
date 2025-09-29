@@ -1,0 +1,250 @@
+
+            if (def.homeKit != null)
+            {
+                ApplyKitFromDefinition(team.HomeKit, def.homeKit, defaultHome1, defaultHome2);
+            }
+            if (def.awayKit != null)
+            {
+                ApplyKitFromDefinition(team.AwayKit, def.awayKit, defaultAway1, defaultAway2);
+            }
+
+            // Runtime logo so UI materials do not break
+            var logo = ScriptableObject.CreateInstance<LogoEntry>();
+            logo.TeamLogoMaterial = Texture2D.whiteTexture;
+            logo.TeamLogoColor1 = new Color(0.85f, 0.85f, 0.85f);
+            logo.TeamLogoColor2 = new Color(0.25f, 0.25f, 0.25f);
+            team.TeamLogo = logo;
+
+            // Build player list (11 entries)
+            var names = def.players ?? Array.Empty<string>();
+            var players = new PlayerEntry[11];
+            if (names.Length != 11)
+            {
+                Debug.LogWarning($"[MatchBridge] '{team.TeamName}' players count={names.Length}. Expected 11. Will auto-fill missing.");
+            }
+            for (int i = 0; i < players.Length; i++)
+            {
+                var p = ScriptableObject.CreateInstance<PlayerEntry>();
+                p.team = team;
+                p.Name = i < names.Length && !string.IsNullOrWhiteSpace(names[i])
+                    ? names[i].Trim()
+                    : $"Player {i + 1}";
+
+                // Set some reasonable neutral attributes; gameplay systems will adapt
+                p.strength = 60;
+                p.acceleration = 60;
+                p.topSpeed = 60;
+                p.dribbleSpeed = 60;
+                p.jump = 60;
+                p.tackling = 60;
+                p.ballKeeping = 60;
+                p.passing = 60;
+                p.longBall = 60;
+                p.agility = 60;
+                p.shooting = 60;
+                p.shootPower = 60;
+                p.positioning = 60;
+                p.reaction = 60;
+                p.ballControl = 60;
+
+                players[i] = p;
+            }
+            team.Players = players;
+
+            // Log the final player list (joined)
+            try
+            {
+                var joined = string.Join(", ", System.Array.ConvertAll(players, x => x?.Name ?? "?"));
+                Debug.Log($"[MatchBridge] '{team.TeamName}' lineup: {joined}");
+            }
+            catch { }
+
+            return team;
+        }
+
+        private static KitEntry CreateRuntimeKit(Color c1, Color c2)
+        {
+            var kit = ScriptableObject.CreateInstance<KitEntry>();
+            kit.Color1 = c1;
+            kit.Color2 = c2;
+            kit.TextColor = Color.black;
+            kit.GKColor1 = new Color(0.10f, 0.65f, 0.35f);
+            kit.GKColor2 = new Color(0.90f, 0.90f, 0.90f);
+            kit.GKTextColor = Color.black;
+            // Ensure non-null textures to avoid UI material issues in WebGL
+            kit.PreviewTexture = Texture2D.whiteTexture;
+            kit.KitMaterial = Texture2D.whiteTexture;
+            return kit;
+        }
+
+        private static void ApplyKitFromDefinition(KitEntry kit, BridgeKitDefinition def, Color fallback1, Color fallback2)
+        {
+            if (kit == null || def == null) return;
+            kit.Color1 = ParseColorOrDefault(def.color1, fallback1);
+            kit.Color2 = ParseColorOrDefault(def.color2, fallback2);
+            kit.TextColor = ParseColorOrDefault(def.textColor, Color.black);
+            kit.GKColor1 = ParseColorOrDefault(def.gkColor1, new Color(0.10f, 0.65f, 0.35f));
+            kit.GKColor2 = ParseColorOrDefault(def.gkColor2, new Color(0.90f, 0.90f, 0.90f));
+            kit.GKTextColor = ParseColorOrDefault(def.gkTextColor, Color.black);
+        }
+
+        // React -> Unity entrypoint
+        public async void LoadMatchFromJSON(string json)
+        {
+            try
+            {
+                Debug.Log("[MatchBridge] JSON received: " + json);
+                var req = JsonConvert.DeserializeObject<BridgeMatchRequest>(json);
+                if (req == null)
+                {
+                    Debug.LogError("[MatchBridge] Invalid JSON payload.");
+                    return;
+                }
+
+                currentMatchId = string.IsNullOrEmpty(req.matchId) ? Guid.NewGuid().ToString("N") : req.matchId;
+
+                // Load TeamEntry assets from Resources
+                var homeTeam = LoadTeamByKey(req.homeTeamKey);
+                var awayTeam = LoadTeamByKey(req.awayTeamKey);
+
+                if (homeTeam == null || awayTeam == null)
+                {
+                    Debug.LogError($"[MatchBridge] Could not find teams. Home='{req.homeTeamKey}' Away='{req.awayTeamKey}'.");
+                    return;
+                }
+
+                var matchRequest = new MatchCreateRequest(homeTeam, awayTeam);
+
+                // Optional overrides
+                if (Enum.TryParse<AILevel>(req.aiLevel, true, out var ai))
+                {
+                    matchRequest.aiLevel = ai;
+                }
+
+                if (Enum.TryParse<MatchCreateRequest.UserTeam>(req.userTeam, true, out var ut))
+                {
+                    matchRequest.userTeam = ut;
+                }
+
+                if (Enum.TryParse<DayTimes>(req.dayTime, true, out var dt))
+                {
+                    matchRequest.dayTime = dt;
+                }
+
+                // Clear prior scorers list
+                scorerNames.Clear();
+
+                // Decide whether to autostart or just open upcoming match UI
+                bool homeAlt = req.homeAltKit ?? false; // false => Home kit
+                bool awayAlt = req.awayAltKit ?? true;  // true  => Away kit
+
+                if (req.autoStart)
+                {
+                    // Start match immediately
+                    var ev = new UpcomingMatchEvent(matchRequest);
+
+                    // Ensure loader exists; give one frame to boot systems
+                    await Task.Yield();
+                    if (MatchEngineLoader.Current == null)
+                    {
+                        Debug.LogWarning("[MatchBridge] MatchEngineLoader not found. Attempting to proceed after short delay...");
+                        await Task.Delay(50);
+                    }
+
+                    if (MatchEngineLoader.Current != null)
+                    {
+                        await MatchEngineLoader.Current.StartMatchEngine(ev, homeAlt, awayAlt);
+                    }
+                    else
+                    {
+                        // Fallback: open pre-match UI (user can start manually)
+                        await MatchEngineLoader.CreateMatch(matchRequest);
+                    }
+                }
+                else
+                {
+                    // Only open the upcoming match UI
+                    await MatchEngineLoader.CreateMatch(matchRequest);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MatchBridge] LoadMatchFromJSON exception: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// React -> Unity: Receive full squads with per-player stats and create runtime TeamEntry/PlayerEntry objects.
+        /// This accepts a flexible JSON shape. Expected example:
+        /// {
+        ///   "home": { "name":"Istanbul", "formation":"_4_5_2", "players":[ {"name":"GK Name", "stats":{"TopSpeed":0.82, "Acceleration":0.61, ...} }, ...11 ] },
+        ///   "away": { ... },
+        ///   "autoStart": false, "aiLevel":"Legendary", "userTeam":"Home", "dayTime":"Night"
+        /// }
+        /// - Stats can be 0..1 or 0..100. They will be scaled/clamped to 0..100.
+        /// - Alternate stat keys are supported (e.g., "Accel" for Acceleration, "Control" for BallControl, etc.).
+        /// </summary>
+        public async void LoadSquadsFromJSON(string json)
+        {
+            try
+            {
+                Debug.Log("[MatchBridge] Squad JSON received.");
+                var root = JObject.Parse(json);
+
+                var homeObj = root["home"] as JObject;
+                var awayObj = root["away"] as JObject;
+                if (homeObj == null || awayObj == null)
+                {
+                    Debug.LogError("[MatchBridge] LoadSquadsFromJSON: Missing 'home' or 'away'.");
+                    return;
+                }
+
+                var homeTeam = CreateRuntimeTeamFromJObject(homeObj);
+                var awayTeam = CreateRuntimeTeamFromJObject(awayObj);
+
+                var matchRequest = new MatchCreateRequest(homeTeam, awayTeam);
+
+                var aiLevelStr = root.Value<string>("aiLevel");
+                var userTeamStr = root.Value<string>("userTeam");
+                var dayTimeStr = root.Value<string>("dayTime");
+                var autoStart = root.Value<bool?>("autoStart") ?? false;
+
+                if (!string.IsNullOrEmpty(aiLevelStr) && Enum.TryParse<AILevel>(aiLevelStr, true, out var ai))
+                {
+                    matchRequest.aiLevel = ai;
+                }
+
+                if (!string.IsNullOrEmpty(userTeamStr) && Enum.TryParse<MatchCreateRequest.UserTeam>(userTeamStr, true, out var ut))
+                {
+                    matchRequest.userTeam = ut;
+                }
+                else
+                {
+                    matchRequest.userTeam = preferredUserTeam;
+                }
+
+                if (!string.IsNullOrEmpty(dayTimeStr) && Enum.TryParse<DayTimes>(dayTimeStr, true, out var dt))
+                {
+                    matchRequest.dayTime = dt;
+                }
+
+                scorerNames.Clear();
+
+                var homeAlt = homeObj.Value<bool?>("altKit") ?? false;
+                var awayAlt = awayObj.Value<bool?>("altKit") ?? true;
+
+                if (autoStart)
+                {
+                    var ev = new UpcomingMatchEvent(matchRequest);
+                    await Task.Yield();
+                    if (MatchEngineLoader.Current != null)
+                    {
+                        await MatchEngineLoader.Current.StartMatchEngine(ev, homeAlt, awayAlt);
+                    }
+                    else
+                    {
+                        await MatchEngineLoader.CreateMatch(matchRequest);
+                    }
+                }
+                else
+                {
